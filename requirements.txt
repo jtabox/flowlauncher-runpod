@@ -1,0 +1,7 @@
+# Using the following packages, but can't be installed via pip
+# but by copying their folders from Python env's site-packages
+# directory to ./lib directly (and their deps too!)
+
+pyflowlauncher
+requests
+pyperclip

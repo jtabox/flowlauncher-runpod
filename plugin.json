@@ -1,0 +1,12 @@
+{
+    "ID": "8fe14148-b095-44bd-b87c-0f9b1906b796",
+    "ActionKeyword": "'rpio",
+    "Name": "runpod.io_status_checker",
+    "Description": "Queries runpod.io's API to get various info",
+    "Author": "jtabox",
+    "Version": "1.0.0",
+    "Language": "python",
+    "Website": "",
+    "IcoPath": "images\\app.png",
+    "ExecuteFileName": "main.py"
+}
