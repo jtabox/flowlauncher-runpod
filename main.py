@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 # FlowLauncher Plugin - Fetches and displays the current balance, spend rate and remaining time for my pods on RunPod.io
-
 # region Untouchable block
 ########## DO NOT TOUCH THIS BLOCK ###################################
 ### Info #########################################
@@ -111,16 +110,15 @@ def query(query: str) -> ResultResponse:
                 )
             ]
         )
-    else:
-        results.append(
-            Result(
-                Title=f":: {balance:.2f} USD ::",
-                SubTitle="Available Balance",
-                IcoPath=APP_IMG,
-                JsonRPCAction={"method": "copy_value", "parameters": [str(balance)]},
-                RoundedIcon=True,
-            )
+    results.append(
+        Result(
+            Title=f":: {balance:.2f} USD ::",
+            SubTitle="Available Balance",
+            IcoPath=APP_IMG,
+            JsonRPCAction={"method": "copy_value", "parameters": [str(balance)]},
+            RoundedIcon=True,
         )
+    )
     # Append the current spend rate
     if current_spend > 0.0:
         current_spend_title = f":: {current_spend:.2f} USD/hr ::"
@@ -233,7 +231,7 @@ def query_data(update_interval_secs: int = 90) -> dict:
     # Gonna be sending this everytime it fails because i cba checking logs
     fail_dict = {"welp": "yes", "what": ""}
     if CACHE_JSON.exists():
-        with open(CACHE_JSON, "r") as f:
+        with open(CACHE_JSON, "r", encoding='utf-8') as f:
             cache = json.load(f)
             if now_epoch - cache["timestamp"] > update_interval_secs:
                 refresh_needed = True
@@ -242,29 +240,28 @@ def query_data(update_interval_secs: int = 90) -> dict:
     if refresh_needed:
         try:
             response = requests.post(
-                API_URL, headers=HEADERS, json={"query": QUERY_MYSELF}
+                API_URL, headers=HEADERS, json={"query": QUERY_MYSELF}, timeout=100
             )
             response.raise_for_status()
         except Exception as e:
             fail_dict["what"] = f"Fail at requests.post:\n{e}"
-            with open(ERROR_LOG, "a") as f:
+            with open(ERROR_LOG, "a", encoding='utf-8') as f:
                 f.write(
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{fail_dict['what']}\n\n"
                 )
             return fail_dict
         data = response.json()["data"]["myself"]
         try:
-            with open(CACHE_JSON, "w") as f:
+            with open(CACHE_JSON, "w", encoding='utf-8') as f:
                 json.dump({"timestamp": now_epoch, "data": data}, f)
         except Exception as e:
             fail_dict["what"] = f"Fail at json.dump:\n{e}"
-            with open(ERROR_LOG, "a") as f:
+            with open(ERROR_LOG, "a", encoding='utf-8') as f:
                 f.write(
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{fail_dict['what']}\n\n"
                 )
         return data
-    else:
-        return cache["data"]
+    return cache["data"]
 
 
 @plugin.on_method
