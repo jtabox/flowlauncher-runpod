@@ -1,47 +1,26 @@
-# -*- coding: utf-8 -*-
 # FlowLauncher Plugin - Fetches and displays the current balance, spend rate and remaining time for my pods on RunPod.io
-# region Untouchable block
-########## DO NOT TOUCH THIS BLOCK ###################################
-### Info #########################################
-# https://www.flowlauncher.com/docs/#/py-develop-plugins
-# https://garulf.github.io/pyFlowLauncher/
-##################################################
 
-### Adds local folders to path ###################
+### Adds local folders to path #######################################
 import sys
 from pathlib import Path
 
 plugindir = Path.absolute(Path(__file__).parent)
 paths = (".", "lib", "plugin")
 sys.path = [str(plugindir / p) for p in paths] + sys.path
-##################################################
 
-### pyflowlauncher minimum requirements ##########
+import os
+import requests
+import json
+from datetime import datetime, timedelta
 from pyflowlauncher import Plugin, Result, send_results
 from pyflowlauncher.result import ResultResponse
-
-##################################################
-
-### Need extra libraries? ########################
-# Copy their folders directly from:
-# <samba dir>\envs\<envname>\Lib\site-packages
-# to: ./lib
-##################################################
-########## DO NOT TOUCH THIS BLOCK ###################################
-# endregion
-
-# Icons in <LocalAppData>\FlowLauncher\app-<current>\Images
-from pyflowlauncher.icons import CANCEL
+from pyflowlauncher.icons import OK, CANCEL
+from pyflowlauncher import api
+from plugin.gql_queries import QUERY_MYSELF, MUTATION_PODRESUME, INPUT_PODRESUME, MUTATION_PODSTOP, INPUT_PODSTOP
 
 RP_LOGO_IMG = "images/rp_logo.png"
 APP_IMG = "images/app.png"
-
-import os
-from plugin.gql_queries import QUERY_MYSELF
-from datetime import datetime, timedelta
-import requests
-import json
-import pyperclip
+LOGFILE = Path(plugindir / "logfile.txt")
 
 HEADERS = {
     "Content-Type": "application/json",
@@ -49,218 +28,192 @@ HEADERS = {
 }
 API_URL = "https://api.runpod.io/graphql"
 CACHE_JSON = Path(plugindir / "cache.json")
-ERROR_LOG = Path(plugindir / "_other" / "error.log")
 
 plugin = Plugin()
+
+def wlog(msg) -> None:
+    msg = str(msg)
+    err_time = datetime.now().strftime("%Y%m%d-%H%M%S.%f")
+    with open(LOGFILE, "a") as f:
+        f.write(f"{err_time}: {msg}\n")
 
 
 @plugin.on_method
 def query(query: str) -> ResultResponse:
     # Check if RUNPOD_API_KEY is set
+    #wlog(f"FROM_QUERY_FUNC:\tReceived query: {query}, checking API key")
     if "RUNPOD_API_KEY" not in os.environ:
+        #wlog("FROM_QUERY_FUNC:\tRUNPOD_API_KEY not in os.environ, exiting")
         return send_results(
             [
                 Result(
-                    Title=":: Where API key? ::",
+                    Title="::: Where API key? :::",
                     SubTitle="The required RUNPOD_API_KEY environment variable is not set!",
                     IcoPath=CANCEL,
-                    JsonRPCAction=None,
                     RoundedIcon=True,
                 )
             ]
         )
     HEADERS["Authorization"] = f"Bearer {os.environ['RUNPOD_API_KEY']}"
+    #wlog(f"FROM_QUERY_FUNC:\tAPI key found, authorization header: {HEADERS['Authorization']}")
     # Query the data and return the results
-    data = query_data()
-    if data.get("welp", False):
-        # Haha oops
+    #wlog("FROM_QUERY_FUNC:\tQuerying data")
+    data = get_myself_query_data()
+    #wlog(f"FROM_QUERY_FUNC:\tReceived data of type: {type(data)}. Data below:\n{data}")
+    if not isinstance(data, dict):
+        #wlog("FROM_QUERY_FUNC:\tData is not a dict, returning error result")
         return send_results(
             [
                 Result(
-                    Title="Welp, something's got fucked I guess ...",
-                    SubTitle=f"I asked that other function to gimme data but nooooo...\n{data['what']}",
+                    Title="::: The query request failed! :::",
+                    SubTitle="Click to copy the exception message to clipboard",
                     IcoPath=CANCEL,
+                    RoundedIcon=True,
+                    JsonRPCAction=api.copy_to_clipboard(str(data), show_default_notification=False),
                 )
             ]
         )
+    # Parse the data and return the results
     results = []
     now = datetime.now()
-    balance = float(data["clientBalance"]) if data.get("clientBalance", False) else 0.0
-    current_spend = (
-        float(data["currentSpendPerHr"])
-        if data.get("currentSpendPerHr", False)
-        else 0.0
-    )
+    balance = float(data.get("clientBalance", 0.0))
+    current_spend = float(data.get("currentSpendPerHr", 0.0))
     pod_id = data["pods"][0]["id"] if data.get("pods", False) else None
     pod_price = (
         float(data["pods"][0]["adjustedCostPerHr"]) if data.get("pods", False) else 0.0
     )
-
+    status_message = data["pods"][0]["lastStatusChange"].split(" by ")[0].strip().upper() if data.get("pods", False) else "UNKNOWN"
+    #wlog(f"FROM_QUERY_FUNC:\tAfter parsing data:\nbalance: |{balance}|\ncurrent_spend: |{current_spend}|\npod_id: |{pod_id}|\npod_price: |{pod_price}|\nstatus_message: |{status_message}|")
     # Inform about the balance for starters
     if balance == 0.0:
-        # Essentially, if the balance is 0, the pods are deleted and there's no spending and no future
+        #wlog("FROM_QUERY_FUNC:\tBalance is 0, returning result")
+        # Essentially if the balance is 0, the pods are already deleted and there's not much else to inform about
         return send_results(
             [
                 Result(
-                    Title=":: No Available Balance! ::",
-                    SubTitle="Won't calculate anything else. PUT.MONEY.IN!",
+                    Title=">>> No Balance Remaining! <<<",
+                    SubTitle="Nothing else to calculate, since everything is LONG DELETED BY NOW. PUT.MONEY.IN!",
                     IcoPath=APP_IMG,
-                    JsonRPCAction=None,
                     RoundedIcon=True,
                 )
             ]
         )
+    # Else, append the balance
     results.append(
         Result(
-            Title=f":: {balance:.2f} USD ::",
-            SubTitle="Available Balance",
+            Title=f">>> Remaining Balance: {balance:.2f} USD <<<",
             IcoPath=APP_IMG,
-            JsonRPCAction={"method": "copy_value", "parameters": [str(balance)]},
             RoundedIcon=True,
         )
     )
+    #wlog(f"FROM_QUERY_FUNC:\tAppended balance {balance:.2f} to results -> len(results): {len(results)}")
     # Append the current spend rate
     if current_spend > 0.0:
-        current_spend_title = f":: {current_spend:.2f} USD/hr ::"
-        current_spend_subtitle = "Current Spend Rate"
+        current_spend_title = f">> Current Cost: {current_spend:.2f} USD/hr <<"
     else:
-        current_spend_title = ":: No Spending Currently ::"
-        current_spend_subtitle = None
+        current_spend_title = ">> No Expenses Currently <<"
 
     results.append(
         Result(
             Title=current_spend_title,
-            SubTitle=current_spend_subtitle,
             IcoPath=APP_IMG,
-            JsonRPCAction={"method": "copy_value", "parameters": [str(current_spend)]},
             RoundedIcon=True,
         )
     )
-
+    #wlog(f"FROM_QUERY_FUNC:\tAppended current_spend {current_spend:.2f} to results -> len(results): {len(results)}")
     # Calculate and append remaining time and end time with current spend if there is any
     if current_spend > 0.0:
         # If we're here then the balance is also > 0
         remaining_hrs_current = balance / current_spend
-        remaining_time_current = f":: {get_remaining_string(remaining_hrs_current)} ::"
-        results.append(
-            Result(
-                Title=remaining_time_current,
-                SubTitle=f"Available time with current spend ({remaining_hrs_current:.2f} hours)",
-                IcoPath=APP_IMG,
-                JsonRPCAction={
-                    "method": "copy_value",
-                    "parameters": [str(remaining_hrs_current)],
-                },
-                RoundedIcon=True,
-            )
-        )
         end_time_current = now + timedelta(hours=remaining_hrs_current)
         results.append(
             Result(
-                Title=f":: {end_time_current.strftime('%Y-%m-%d %H:%M')} ::",
-                SubTitle=f"Balance depletion date with current spend (at {int(datetime.timestamp(end_time_current))} secs since epoch)",
+                Title=f">> Remaining: {get_remaining_string(remaining_hrs_current)} <<",
+                SubTitle=f"Ending at {end_time_current.strftime('%Y-%m-%d %H:%M')} (approx. {remaining_hrs_current:.2f} hrs)",
                 IcoPath=APP_IMG,
-                JsonRPCAction={
-                    "method": "copy_value",
-                    "parameters": [str(int(datetime.timestamp(end_time_current)))],
-                },
                 RoundedIcon=True,
             )
         )
+        #wlog(f"FROM_QUERY_FUNC:\tAppended remaining time info to results -> len(results): {len(results)}")
 
     # Same for the pod, if there is one
     if pod_id is not None and pod_price > 0:
-        results.append(
-            Result(
-                Title=f": Running Cost : {pod_price:.2f} USD/hr :",
-                SubTitle=f"For pod with id '{pod_id}'",
-                IcoPath=RP_LOGO_IMG,
-                JsonRPCAction={"method": "copy_value", "parameters": [pod_id]},
-                RoundedIcon=True,
-            )
-        )
         remaining_hrs_pod = balance / pod_price
-        remaining_time_pod = f": {get_remaining_string(remaining_hrs_pod)} :"
         results.append(
             Result(
-                Title=remaining_time_pod,
-                SubTitle=f"Available time with the pod active ({remaining_hrs_pod:.2f} hours)",
+                Title=f": Available Pod Runtime: {get_remaining_string(remaining_hrs_pod)} (at {pod_price:.2f} USD/hr) :",
+                SubTitle=f"Pod ID: '{pod_id}'. Current status: {status_message}",
                 IcoPath=RP_LOGO_IMG,
-                JsonRPCAction={
-                    "method": "copy_value",
-                    "parameters": [str(remaining_hrs_pod)],
-                },
+                JsonRPCAction=api.copy_to_clipboard(str(pod_id), show_default_notification=False),
                 RoundedIcon=True,
             )
         )
-        end_time_pod = now + timedelta(hours=remaining_hrs_pod)
-        results.append(
-            Result(
-                Title=f": {end_time_pod.strftime('%Y-%m-%d %H:%M')} :",
-                SubTitle=f"Balance depletion date with the pod active (at {int(datetime.timestamp(end_time_pod))} secs since epoch)",
-                IcoPath=RP_LOGO_IMG,
-                JsonRPCAction={
-                    "method": "copy_value",
-                    "parameters": [str(int(datetime.timestamp(end_time_pod)))],
-                },
-                RoundedIcon=True,
+        #wlog(f"FROM_QUERY_FUNC:\tAppended pod info to results -> len(results): {len(results)}")
+        # On/Off buttons
+        if status_message in ["EXITED", "UNKNOWN"]:
+            # On
+            results.append(
+                Result(
+                    Title="+> Start Pod <+",
+                    IcoPath=OK,
+                    JsonRPCAction=plugin.action(pod_power, [pod_id, "on"]),
+                    RoundedIcon=True,
+                )
             )
-        )
-
-    # Append the current time for reference (though not sure I'll keep this)
-    results.append(
-        Result(
-            Title=f"Calculated at {now.strftime('%Y-%m-%d %H:%M')}",
-            SubTitle=f"({int(datetime.timestamp(now))} secs since epoch)",
-            IcoPath=APP_IMG,
-            JsonRPCAction={
-                "method": "copy_value",
-                "parameters": [str(int(datetime.timestamp(now)))],
-            },
-            RoundedIcon=True,
-        )
-    )
+            #wlog(f"FROM_QUERY_FUNC:\tStatus message is {status_message}, appended Start Pod button -> len(results): {len(results)}")
+        else:
+            # Off
+            results.append(
+                Result(
+                    Title="-> Stop Pod <-",
+                    IcoPath=CANCEL,
+                    JsonRPCAction=plugin.action(pod_power, [pod_id, "off"]),
+                    RoundedIcon=True,
+                )
+            )
+            #wlog(f"FROM_QUERY_FUNC:\tStatus message is {status_message}, appended Stop Pod button -> len(results): {len(results)}")
+    #wlog(f"FROM_QUERY_FUNC:\tReturning results -> len(results): {len(results)}")
     return send_results(results)
 
 
 @plugin.on_method
-def query_data(update_interval_secs: int = 90) -> dict:
+def get_myself_query_data(update_interval_secs: int = 180) -> dict | str:
     # Queries the data from the API if necessary after checking the cache file
     now_epoch = int(datetime.now().timestamp())
     refresh_needed = False
-    # Gonna be sending this everytime it fails because i cba checking logs
-    fail_dict = {"welp": "yes", "what": ""}
+    #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tWas called with update_interval_secs: {update_interval_secs}, set now_epoch: {now_epoch} and refresh_needed: {refresh_needed}")
     if CACHE_JSON.exists():
         with open(CACHE_JSON, "r", encoding='utf-8') as f:
             cache = json.load(f)
+            #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tFile {CACHE_JSON} exists, loaded cache data: {cache}")
             if now_epoch - cache["timestamp"] > update_interval_secs:
                 refresh_needed = True
+                #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tRefresh needed set to {refresh_needed}: now_epoch: {now_epoch} - cache['timestamp']: {cache['timestamp']}: {now_epoch - cache['timestamp'] > update_interval_secs}")
     else:
         refresh_needed = True
+        #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tFile {CACHE_JSON} does not exist, refresh needed set to {refresh_needed}")
+
     if refresh_needed:
+        response = requests.post(API_URL, headers=HEADERS, json={"query": QUERY_MYSELF}, timeout=100)
+        #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tRefresh needed, sent request with:\n{API_URL}\n{HEADERS}\n{QUERY_MYSELF}")
         try:
-            response = requests.post(
-                API_URL, headers=HEADERS, json={"query": QUERY_MYSELF}, timeout=100
-            )
+            #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tResponse status code: {response.status_code}")
             response.raise_for_status()
         except Exception as e:
-            fail_dict["what"] = f"Fail at requests.post:\n{e}"
-            with open(ERROR_LOG, "a", encoding='utf-8') as f:
-                f.write(
-                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{fail_dict['what']}\n\n"
-                )
-            return fail_dict
+            #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tResponse error: {e}")
+            return str(e)
+        #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tResponse OK, data: {response.json()}")
         data = response.json()["data"]["myself"]
         try:
             with open(CACHE_JSON, "w", encoding='utf-8') as f:
                 json.dump({"timestamp": now_epoch, "data": data}, f)
-        except Exception as e:
-            fail_dict["what"] = f"Fail at json.dump:\n{e}"
-            with open(ERROR_LOG, "a", encoding='utf-8') as f:
-                f.write(
-                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n{fail_dict['what']}\n\n"
-                )
+                #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tData written to cache file {CACHE_JSON} with timestamp: {now_epoch}")
+        except:
+            #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tError writing data to cache file {CACHE_JSON}")
+            pass
+        #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tReturning data as response.json()['data']['myself']:\n{data}")
         return data
+    #wlog(f"FROM_GET_MYSELF_QUERY_DATA:\tReturning cache['data']: {cache['data']}")
     return cache["data"]
 
 
@@ -293,9 +246,74 @@ def get_remaining_string(remaining_hrs: float) -> str:
 
 
 @plugin.on_method
-def copy_value(value: str) -> None:
-    # Not much to say here
-    pyperclip.copy(value)
+def pod_power(pod_id: int, mode: str) -> str:
+    #wlog(f"FROM_POD_POWER:\tWas called with pod_id: {pod_id}, mode: {mode}")
+    if mode == "on":
+        mutation = MUTATION_PODRESUME
+        input_data = INPUT_PODRESUME
+        method_name = "podResume"
+    else:
+        mutation = MUTATION_PODSTOP
+        input_data = INPUT_PODSTOP
+        method_name = "podStop"
 
+    input_data["podId"] = pod_id
+    # Gotta set the headers again, since the plugin is stateless
+    HEADERS["Authorization"] = f"Bearer {os.environ['RUNPOD_API_KEY']}"
+    response = requests.post(API_URL, headers=HEADERS, json={"query": mutation, "variables": {"input": input_data}})
+    #wlog(f"FROM_POD_POWER:\tSent mutation query of type {type(mutation)} with query:\n{mutation}\nheaders:\n{HEADERS}\ninput_data:\n{input_data}")
+    try:
+        #wlog(f"FROM_POD_POWER:\tResponse status code: {response.status_code}")
+        response.raise_for_status()
+    except Exception as e:
+        #wlog(f"FROM_POD_POWER:\tResponse error: {e}")
+        return send_results(
+            [
+                Result(
+                    Title=f"::: Could not turn {mode.strip()} the pod! :::",
+                    SubTitle="Click to copy the exception message to clipboard",
+                    IcoPath=CANCEL,
+                    RoundedIcon=True,
+                    JsonRPCAction=api.copy_to_clipboard(str(e).strip(), show_default_notification=False),
+                )
+            ]
+        )
+
+    # Force new data fetch, to update the cache and make checks
+    new_data = get_myself_query_data(0)
+    status_message = new_data["pods"][0]["lastStatusChange"].split(" by ")[0].strip().upper()
+    if mode == "off":
+        return send_results(
+            [
+                Result(
+                    Title=f"::: Pod Stopped with Status: {status_message} :::",
+                    IcoPath=OK,
+                    RoundedIcon=True,
+                )
+            ]
+        )
+
+    # Pod was turned on, get some info from the response
+    resume_response = response.json()["data"][method_name]
+    resume_info = {
+        "id": resume_response["id"],
+        "name": resume_response["name"],
+        "gpus": resume_response["gpuCount"],
+        "cost": resume_response["adjustedCostPerHr"],
+        "status": resume_response["lastStatusChange"].split(" by ")[0].strip().upper(),
+        "memory": resume_response["memoryInGb"],
+        "vcpus": resume_response["vcpuCount"],
+        "hdd_size": resume_response["volumeInGb"],
+        "gpu_type": resume_response["machine"]["gpuDisplayName"],
+        "max_dl_speed": resume_response["machine"]["maxDownloadSpeedMbps"],
+        "max_ul_speed": resume_response["machine"]["maxUploadSpeedMbps"],
+        "datacenter": resume_response["machine"]["dataCenterId"],
+    }
+
+    resume_title = f"::: Pod {resume_info['name']} is now {status_message} with {resume_info['gpus']}x {resume_info['gpu_type']} at {resume_info['cost']:.2f} USD/hr :::"
+    resume_subtitle = f"vCPUs: {resume_info['vcpus']}, RAM: {resume_info['memory']} GB, Disk: {resume_info['hdd_size']} GB, Net: {int(int(resume_info['max_dl_speed'])/1024)}/{int(int(resume_info['max_ul_speed'])/1024)} Gbps"
+
+    #wlog(f"FROM_POD_POWER:\tReceived mutation response: {response.json()}, forced new_data fetch before returning and got: {new_data}")
+    return
 
 plugin.run()
