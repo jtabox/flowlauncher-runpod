@@ -23,17 +23,15 @@ query pod($input: PodFilter) {
     id
     containerDiskInGb
     adjustedCostPerHr
-    imageName
     lastStatusChange
     memoryInGb
     name
-    ports
     gpuCount
     vcpuCount
     volumeInGb
     volumeMountPath
-    uptimeSeconds
     runtime {
+      uptimeInSeconds
       ports {
         ip
         isIpPublic
@@ -41,10 +39,8 @@ query pod($input: PodFilter) {
         publicPort
         type
       }
-      uptimeInSeconds
     }
     machine {
-      diskMBps
       gpuDisplayName
       maxDownloadSpeedMbps
       maxUploadSpeedMbps

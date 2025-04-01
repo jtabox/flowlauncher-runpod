@@ -15,7 +15,16 @@ from datetime import datetime, timedelta
 
 from pyflowlauncher import Plugin, Result, send_results
 from pyflowlauncher.result import ResultResponse
-from pyflowlauncher.icons import OK, CANCEL, WARNING, FIND
+from pyflowlauncher.icons import (
+    OK,
+    CANCEL,
+    WARNING,
+    FIND,
+    INFO,
+    SETTINGS,
+    UPDATE,
+    CHECKUPDATE,
+)
 from pyflowlauncher import api
 
 from plugin.gql_queries import (
@@ -342,7 +351,7 @@ def set_pod_power(pod_id: str, mode: str) -> ResultResponse:
     }
     resume_title = f"::: Pod {status_message}: {pod_resume_info['name']} @ {pod_resume_info['datacenter']} :::"
     resume_subtitle = f"{pod_resume_info['gpu_count']}x {pod_resume_info['gpu_name']} at {pod_resume_info['cost']:.2f} USD/hr -- Click to get specs and connection info"
-    # Specs: {pod_resume_info['vcpus']} vCPUs, {pod_resume_info['ram']}GB RAM, {pod_resume_info['hdd_size']}GB storage, {int(int(pod_resume_info['max_dl_speed'])/1024)}/{int(int(pod_resume_info['max_ul_speed'])/1024)} Gbps net -
+
     return send_results(
         [
             Result(
@@ -385,18 +394,114 @@ def get_pod_runtime_details(pod_id: str) -> ResultResponse:
             ]
         )
 
+    # Parse the data and return the results
     runtime_data = response.json()["data"]["pod"]
+
+    # The following are always available, even when the pod is stopped
+    pod_info = {
+        "name": runtime_data["name"],
+        "datacenter": runtime_data["machine"]["dataCenterId"],
+        "id": runtime_data["id"],
+        "cost": runtime_data["adjustedCostPerHr"],
+        "status": runtime_data["lastStatusChange"].split(" by ")[0].strip().upper(),
+        "gpu_count": runtime_data["gpuCount"],
+        "gpu_name": runtime_data["machine"]["gpuDisplayName"],
+        "gpu_vram": runtime_data["machine"]["gpuType"]["memoryInGb"],
+        "vcpu_count": runtime_data["vcpuCount"],
+        "container_ram": runtime_data["memoryInGb"],
+        "container_disk_size": runtime_data["containerDiskInGb"],
+        "volume_size": runtime_data["volumeInGb"],
+        "volume_mount_path": runtime_data["volumeMountPath"],
+        "max_dl_speed": round(runtime_data["machine"]["maxDownloadSpeedMbps"] / 1024),
+        "max_ul_speed": round(runtime_data["machine"]["maxUploadSpeedMbps"] / 1024),
+        "public_ip": None,
+        "uptime": None,
+        "ports_tcp": [],
+        "ports_http": [],
+        "ssh_ext_port": None,
+    }
+
+    if runtime_data["runtime"] is not None:
+        # Is none if the container hasn't booted up completely
+        if runtime_data["runtime"]["uptimeInSeconds"] < 60:
+            pod_info["uptime"] = runtime_data["runtime"]["uptimeInSeconds"] + " secs"
+        elif runtime_data["runtime"]["uptimeInSeconds"] < 3600:
+            pod_info["uptime"] = (
+                runtime_data["runtime"]["uptimeInSeconds"] // 60 + " mins"
+            )
+        else:
+            pod_info["uptime"] = (
+                runtime_data["runtime"]["uptimeInSeconds"] // 3600 + " hrs"
+            )
+        for port in runtime_data["runtime"]["ports"]:
+            if not port["isIpPublic"]:
+                # Don't care
+                continue
+            pod_info["public_ip"] = port["ip"]
+            port_details = (port["privatePort"], port["publicPort"])
+            if port_details[0] == 22:
+                pod_info["ssh_ext_port"] = port_details[1]
+            if port["type"] == "tcp":
+                pod_info["ports_tcp"].append(port_details)
+            elif port["type"] == "http":
+                pod_info["ports_http"].append(port_details)
+        # Sort the ports by private asc
+        pod_info["ports_tcp"] = sorted(pod_info["ports_tcp"], key=lambda x: x[0])
+        pod_info["ports_http"] = sorted(pod_info["ports_http"], key=lambda x: x[0])
+
+    uptime_str = (
+        f" - up for {pod_info['uptime']}" if pod_info["uptime"] is not None else ""
+    )
+
+    results = []
+    results.append(
+        Result(
+            Title=f"> Pod {pod_info['name']} @ {pod_info['datacenter']} (ID: {pod_info['id']}) <",
+            SubTitle=f"Cost: {pod_info['cost']:.2f} USD/hr. Current status: {pod_info['status']}{uptime_str}",
+            IcoPath=INFO,
+            RoundedIcon=True,
+        )
+    )
+    results.append(
+        Result(
+            Title=f"> GPU: {pod_info['gpu_count']}x {pod_info['gpu_name']} {pod_info['gpu_vram']} GB<",
+            SubTitle=f"Container: {pod_info['vcpu_count']} vCPUs, {pod_info['container_ram']}GB RAM, {pod_info['container_disk_size']}GB HDD",
+            IcoPath=SETTINGS,
+            RoundedIcon=True,
+        )
+    )
+    results.append(
+        Result(
+            Title=f"> Volume: {pod_info['volume_size']}GB (at {pod_info['volume_mount_path']}) <",
+            SubTitle=f"Network: {pod_info['max_dl_speed']} Gbps down, {pod_info['max_ul_speed']} Gbps up",
+            IcoPath=UPDATE,
+            RoundedIcon=True,
+        )
+    )
+
     if runtime_data["runtime"] is None:
-        return send_results(
-            [
-                Result(
-                    Title=f"::: Runtime info for pod with ID {pod_id} isn't available! :::",
-                    SubTitle="If the pod was started recently, wait a bit and click to try again",
-                    IcoPath=WARNING,
-                    RoundedIcon=True,
-                    JsonRPCAction=plugin.action(get_pod_runtime_details, [pod_id]),
-                )
-            ]
+        # Container not fully booted up yet
+        results.append(
+            Result(
+                Title=f"> No connection info available, container isn't fully booted up <",
+                SubTitle="If the pod was started recently, wait a bit and click to try again",
+                IcoPath=CHECKUPDATE,
+                RoundedIcon=True,
+                JsonRPCAction=plugin.action(get_pod_runtime_details, [pod_id]),
+            )
+        )
+    else:
+        ssh_cmd_str = f"ssh root@{pod_info['public_ip']} -p {pod_info['ssh_ext_port']} -i .ssh\zonettu -L :9999:localhost:8188 -L :9998:localhost:8384"
+        results.append(
+            Result(
+                Title=f"> Public IP: {pod_info['public_ip']} <",
+                SubTitle=f"TCP: {', '.join([f'i{p[0]}:e{p[1]}' for p in pod_info['ports_tcp']])} / HTTP: {', '.join([f'i{p[0]}:e{p[1]}' for p in pod_info['ports_http']])}",
+                IcoPath=OK,
+                RoundedIcon=True,
+                JsonRPCAction=api.copy_to_clipboard(
+                    ssh_cmd_str, show_default_notification=False
+                ),
+            )
         )
 
 
